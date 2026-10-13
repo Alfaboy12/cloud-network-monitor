@@ -5,8 +5,7 @@ import time
 
 import os
 
-app = Flask(
-    __name__,
+app = Flask(__name__)
     template_folder=os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 )
 
@@ -49,5 +48,6 @@ def home():
     )
 
 
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=False)
