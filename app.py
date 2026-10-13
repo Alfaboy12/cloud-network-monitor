@@ -1,46 +1,44 @@
 import os
+import time
+import sqlite3
 import csv
 import io
-import socket
-import sqlite3
-import time
-from flask import Flask, request, redirect, jsonify, Response, render_template_string
+from datetime import datetime
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+
+from flask import Flask, request, redirect, url_for, jsonify, Response, render_template_string
 
 app = Flask(__name__)
 
-# Database location
-DATABASE = os.environ.get("DATABASE_PATH", "monitor.db")
+DB_PATH = os.environ.get("DATABASE_PATH", "monitor.db")
 
 
-def get_db():
-    db = sqlite3.connect(DATABASE, timeout=10)
+def connect_db():
+    db = sqlite3.connect(DB_PATH, timeout=15)
     db.row_factory = sqlite3.Row
     return db
 
 
 def init_db():
-    folder = os.path.dirname(DATABASE)
-    if folder:
-        os.makedirs(folder, exist_ok=True)
-
-    with get_db() as db:
+    with connect_db() as db:
         db.execute("""
             CREATE TABLE IF NOT EXISTS servers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
-                host TEXT NOT NULL,
-                port INTEGER NOT NULL DEFAULT 443
+                address TEXT NOT NULL
             )
         """)
 
         db.execute("""
             CREATE TABLE IF NOT EXISTS readings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_name TEXT,
-                host TEXT,
-                status TEXT,
+                server_id INTEGER,
+                server_name TEXT NOT NULL,
+                address TEXT NOT NULL,
+                status TEXT NOT NULL,
                 response_ms REAL,
-                checked_at TEXT DEFAULT CURRENT_TIMESTAMP
+                checked_at TEXT NOT NULL
             )
         """)
 
@@ -50,246 +48,421 @@ def init_db():
 
         if count == 0:
             db.execute(
-                "INSERT INTO servers (name, host, port) VALUES (?, ?, ?)",
-                ("Google", "google.com", 443)
+                "INSERT INTO servers (name, address) VALUES (?, ?)",
+                ("Google", "https://www.google.com")
             )
 
 
-init_db()
+def list_servers():
+    with connect_db() as db:
+        return db.execute(
+            "SELECT * FROM servers ORDER BY id"
+        ).fetchall()
 
 
-def check_server(host, port):
+def check_server(address):
     start = time.perf_counter()
 
     try:
-        with socket.create_connection((host, port), timeout=3):
-            elapsed = round(
-                (time.perf_counter() - start) * 1000, 2
+        address = address.strip()
+        parsed = urlparse(address)
+
+        if parsed.scheme in ("http", "https") and parsed.hostname:
+            req = Request(
+                address,
+                headers={"User-Agent": "CloudNetworkMonitor/1.0"}
             )
-        return "ONLINE", elapsed
-    except (OSError, ValueError):
-        return "OFFLINE", None
+
+            with urlopen(req, timeout=5) as response:
+                response.read(1)
+
+            elapsed = (time.perf_counter() - start) * 1000
+            return "Online", round(elapsed, 2)
+
+        host = parsed.hostname if parsed.hostname else address
+
+        if ":" in host and not parsed.hostname:
+            host, port_text = host.rsplit(":", 1)
+            port = int(port_text)
+        else:
+            port = parsed.port if parsed.port else 80
+
+        import socket
+
+        with socket.create_connection((host, port), timeout=5):
+            elapsed = (time.perf_counter() - start) * 1000
+            return "Online", round(elapsed, 2)
+
+    except Exception:
+        return "Offline", None
 
 
-DASHBOARD = """
+def monitor_servers():
+    results = []
+
+    for server in list_servers():
+        status, response_ms = check_server(server["address"])
+        checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        with connect_db() as db:
+            db.execute("""
+                INSERT INTO readings
+                (server_id, server_name, address, status, response_ms, checked_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                server["id"],
+                server["name"],
+                server["address"],
+                status,
+                response_ms,
+                checked_at
+            ))
+
+        results.append({
+            "id": server["id"],
+            "name": server["name"],
+            "address": server["address"],
+            "status": status,
+            "response_ms": response_ms,
+            "checked_at": checked_at
+        })
+
+    return results
+
+
+PAGE = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+<meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cloud Network Monitor</title>
+<title>Cloud Network Monitoring</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
 <style>
+* { box-sizing: border-box; }
+
 body {
-    font-family: Arial, sans-serif;
-    background: #101827;
-    color: white;
-    padding: 15px;
     margin: 0;
+    font-family: Arial, sans-serif;
+    background: #f1f5f9;
+    color: #172033;
 }
-.container { max-width: 1000px; margin: auto; }
-.card {
-    background: #1e293b;
-    padding: 16px;
-    margin: 15px 0;
-    border-radius: 10px;
-}
-input, button {
-    padding: 11px;
-    margin: 5px 2px;
-    border: 0;
-    border-radius: 5px;
-}
-button, .btn {
-    background: #16a34a;
+
+header {
+    background: #12304a;
     color: white;
-    cursor: pointer;
-    padding: 10px;
-    border-radius: 5px;
-    border: 0;
-    text-decoration: none;
+    padding: 24px 16px;
+}
+
+header h1 { margin: 0 0 8px; font-size: 25px; }
+header p { margin: 0; color: #dbeafe; }
+
+main {
+    max-width: 1150px;
+    margin: 24px auto;
+    padding: 0 15px;
+}
+
+.cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 15px;
+}
+
+.card, .panel {
+    background: white;
+    padding: 20px;
+    margin-bottom: 20px;
+    border-radius: 12px;
+    box-shadow: 0 3px 12px rgba(0,0,0,.06);
+}
+
+.card h3 {
+    margin-top: 0;
+    font-size: 14px;
+    color: #64748b;
+}
+
+.number { font-size: 28px; font-weight: bold; }
+
+input {
+    display: block;
+    width: 100%;
+    padding: 12px;
+    margin: 8px 0 14px;
+    border: 1px solid #cbd5e1;
+    border-radius: 7px;
+    font-size: 15px;
+}
+
+button, .button {
     display: inline-block;
+    border: none;
+    border-radius: 7px;
+    background: #1769aa;
+    color: white;
+    padding: 11px 15px;
+    cursor: pointer;
+    text-decoration: none;
+    font-size: 14px;
 }
-.delete { background: #dc2626; }
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+
+button:hover, .button:hover { background: #0d4f83; }
+.delete { background: #c0392b; }
+
+.table-wrap { overflow-x: auto; }
+
+table {
+    width: 100%;
+    min-width: 600px;
+    border-collapse: collapse;
+}
+
 th, td {
-    padding: 10px;
-    border-bottom: 1px solid #475569;
+    padding: 12px 10px;
     text-align: left;
+    border-bottom: 1px solid #e2e8f0;
 }
-.tablewrap { overflow-x: auto; }
-.good { color: #4ade80; }
-.bad { color: #f87171; }
-.small { color: #cbd5e1; font-size: 13px; }
+
+th { background: #f8fafc; }
+
+.online { color: #16803c; font-weight: bold; }
+.offline { color: #c0392b; font-weight: bold; }
+
+.muted { color: #64748b; font-size: 13px; }
+.message {
+    background: #dbeafe;
+    padding: 12px;
+    border-radius: 7px;
+    margin-bottom: 15px;
+}
+
+footer {
+    text-align: center;
+    padding: 25px;
+    color: #64748b;
+}
+
+@media(max-width: 600px) {
+    header h1 { font-size: 21px; }
+    .card, .panel { padding: 15px; }
+}
 </style>
 </head>
 
 <body>
-<div class="container">
+<header>
+    <h1>Cloud-Based Network Performance Monitoring</h1>
+    <p>Monitor server availability and response time.</p>
+</header>
 
-<h1>☁️ Cloud Network Monitor</h1>
-<p>Cloud-Based Network Performance Monitoring and Analysis</p>
+<main>
+    {% if message %}
+    <div class="message">{{ message }}</div>
+    {% endif %}
 
-<div class="card">
-<h2>Add a Server</h2>
-<form action="/servers/add" method="post">
-<input name="name" placeholder="Server name" required>
-<input name="host" placeholder="Hostname e.g. google.com" required>
-<input name="port" type="number" value="443" min="1" max="65535" required>
-<button type="submit">Add Server</button>
-</form>
-<p class="small">Only monitor servers you own or have permission to test.</p>
-</div>
+    <div class="cards">
+        <div class="card">
+            <h3>Total Servers</h3>
+            <div class="number" id="total">0</div>
+        </div>
 
-<div class="card">
-<h2>Server Status</h2>
-<p id="lastcheck" class="small">Loading server information...</p>
-<div class="tablewrap">
-<table>
-<thead>
-<tr>
-<th>Name</th><th>Host</th><th>Status</th>
-<th>Response Time</th><th>Action</th>
-</tr>
-</thead>
-<tbody id="servers"></tbody>
-</table>
-</div>
-</div>
+        <div class="card">
+            <h3>Servers Online</h3>
+            <div class="number online" id="online">0</div>
+        </div>
 
-<div class="card">
-<h2>Performance Summary</h2>
-<p id="summary">Loading...</p>
-<canvas id="chart"></canvas>
-</div>
+        <div class="card">
+            <h3>Servers Offline</h3>
+            <div class="number offline" id="offline">0</div>
+        </div>
 
-<div class="card">
-<h2>Recent Monitoring History</h2>
-<p><a class="btn" href="/export">Download CSV Report</a></p>
-<div class="tablewrap">
-<table>
-<thead>
-<tr>
-<th>Time</th><th>Server</th><th>Host</th>
-<th>Status</th><th>Response (ms)</th>
-</tr>
-</thead>
-<tbody id="history"></tbody>
-</table>
-</div>
-</div>
+        <div class="card">
+            <h3>Average Response Time</h3>
+            <div class="number" id="average">--</div>
+            <p class="muted">Milliseconds</p>
+        </div>
+    </div>
 
-</div>
+    <section class="panel">
+        <h2>Add a Server or Website</h2>
+
+        <form action="/add" method="POST">
+            <label>Server name</label>
+            <input name="name" placeholder="Example: My Website" required>
+
+            <label>Website URL</label>
+            <input name="address"
+                   placeholder="https://example.com"
+                   required>
+
+            <button type="submit">Add Server</button>
+        </form>
+    </section>
+
+    <section class="panel">
+        <h2>Server Status</h2>
+        <p id="updated" class="muted">Loading monitoring data...</p>
+
+        <div class="table-wrap">
+            <table>
+                <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Address</th>
+                    <th>Status</th>
+                    <th>Response Time</th>
+                    <th>Last Checked</th>
+                    <th>Action</th>
+                </tr>
+                </thead>
+                <tbody id="serverRows">
+                    <tr><td colspan="6">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <p>
+            <button onclick="refreshData()">Check Servers Now</button>
+            <a class="button" href="/export">Export CSV</a>
+        </p>
+    </section>
+
+    <section class="panel">
+        <h2>Network Performance History</h2>
+        <canvas id="chart"></canvas>
+    </section>
+</main>
+
+<footer>Cloud-Based Network Performance Monitoring and Analysis</footer>
 
 <script>
-let chart = null;
+let chart;
 
 async function refreshData() {
+    document.getElementById("updated").textContent =
+        "Checking servers...";
+
     try {
-        const response = await fetch('/api/monitor', {cache: 'no-store'});
-        if (!response.ok) throw new Error('Request failed');
+        const response = await fetch("/api/monitor", {
+            cache: "no-store"
+        });
+
+        if (!response.ok) throw new Error("Monitoring request failed");
 
         const data = await response.json();
 
-        const serverBody = document.getElementById('servers');
-        serverBody.innerHTML = '';
+        document.getElementById("total").textContent = data.summary.total;
+        document.getElementById("online").textContent = data.summary.online;
+        document.getElementById("offline").textContent = data.summary.offline;
+
+        document.getElementById("average").textContent =
+            data.summary.average_ms === null
+                ? "--"
+                : data.summary.average_ms.toFixed(2);
+
+        const tbody = document.getElementById("serverRows");
+        tbody.replaceChildren();
+
+        if (!data.servers.length) {
+            const row = tbody.insertRow();
+            const cell = row.insertCell();
+            cell.colSpan = 6;
+            cell.textContent = "No servers added.";
+        }
 
         data.servers.forEach(server => {
-            const row = document.createElement('tr');
+            const row = tbody.insertRow();
 
-            const values = [
-                server.name,
-                server.host,
-                server.status,
-                server.response_ms === null ? 'N/A' : server.response_ms + ' ms'
-            ];
+            row.insertCell().textContent = server.name;
+            row.insertCell().textContent = server.address;
 
-            values.forEach((value, index) => {
-                const cell = document.createElement('td');
-                cell.textContent = value;
-                if (index === 2) {
-                    cell.className = server.status === 'ONLINE' ? 'good' : 'bad';
-                }
-                row.appendChild(cell);
-            });
+            const status = row.insertCell();
+            status.textContent = server.status;
+            status.className =
+                server.status === "Online" ? "online" : "offline";
 
-            const actionCell = document.createElement('td');
-            const form = document.createElement('form');
-            form.method = 'post';
-            form.action = '/servers/delete/' + server.id;
+            row.insertCell().textContent =
+                server.response_ms === null
+                    ? "--"
+                    : server.response_ms + " ms";
 
-            const button = document.createElement('button');
-            button.className = 'delete';
-            button.textContent = 'Remove';
-            button.onclick = function(event) {
-                if (!confirm('Remove this server?')) event.preventDefault();
-            };
+            row.insertCell().textContent = server.checked_at;
+
+            const action = row.insertCell();
+            const form = document.createElement("form");
+            form.method = "POST";
+            form.action = "/delete/" + server.id;
+
+            const button = document.createElement("button");
+            button.className = "delete";
+            button.textContent = "Delete";
+            button.type = "submit";
 
             form.appendChild(button);
-            actionCell.appendChild(form);
-            row.appendChild(actionCell);
-            serverBody.appendChild(row);
+            action.appendChild(form);
         });
 
-        const historyBody = document.getElementById('history');
-        historyBody.innerHTML = '';
+        updateChart(data.history);
 
-        data.history.forEach(item => {
-            const row = document.createElement('tr');
-            [
-                item.checked_at,
-                item.server_name,
-                item.host,
-                item.status,
-                item.response_ms === null ? 'N/A' : item.response_ms
-            ].forEach(value => {
-                const cell = document.createElement('td');
-                cell.textContent = value ?? '';
-                row.appendChild(cell);
-            });
-            historyBody.appendChild(row);
-        });
-
-        document.getElementById('summary').textContent =
-            'Servers: ' + data.servers.length +
-            ' | Online: ' + data.online +
-            ' | Offline: ' + (data.servers.length - data.online) +
-            ' | Average response time: ' +
-            (data.average_ms === null ? 'N/A' : data.average_ms + ' ms');
-
-        document.getElementById('lastcheck').textContent =
-            'Last checked: ' + new Date().toLocaleTimeString() +
-            ' | Updates every 15 seconds while this page is open';
-
-        if (chart) chart.destroy();
-
-        chart = new Chart(document.getElementById('chart'), {
-            type: 'line',
-            data: {
-                labels: data.history.slice().reverse().map(x => x.checked_at),
-                datasets: [{
-                    label: 'Response Time (ms)',
-                    data: data.history.slice().reverse().map(x => x.response_ms),
-                    spanGaps: false,
-                    borderWidth: 2
-                }]
-            },
-            options: {
-                responsive: true,
-                scales: { y: { beginAtZero: true } }
-            }
-        });
+        document.getElementById("updated").textContent =
+            "Last updated: " + new Date().toLocaleString();
 
     } catch (error) {
-        document.getElementById('summary').textContent =
-            'Unable to load monitoring data. Refresh the page.';
+        document.getElementById("updated").textContent =
+            "Unable to load data. Please try again.";
+    }
+}
+
+function updateChart(history) {
+    const labels = [...new Set(
+        history.map(item => item.checked_at)
+    )].slice(-20);
+
+    const names = [...new Set(
+        history.map(item => item.server_name)
+    )];
+
+    const datasets = names.map(name => ({
+        label: name + " (ms)",
+        data: labels.map(label => {
+            const item = history.find(
+                x => x.server_name === name &&
+                     x.checked_at === label
+            );
+            return item ? item.response_ms : null;
+        }),
+        spanGaps: false
+    }));
+
+    if (chart) {
+        chart.data.labels = labels;
+        chart.data.datasets = datasets;
+        chart.update();
+    } else {
+        chart = new Chart(document.getElementById("chart"), {
+            type: "line",
+            data: { labels, datasets },
+            options: {
+                responsive: true,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: "Response time (milliseconds)"
+                        }
+                    }
+                }
+            }
+        });
     }
 }
 
 refreshData();
 setInterval(refreshData, 15000);
 </script>
-
 </body>
 </html>
 """
@@ -297,94 +470,86 @@ setInterval(refreshData, 15000);
 
 @app.route("/")
 def dashboard():
-    return render_template_string(DASHBOARD)
+    return render_template_string(
+        PAGE,
+        message=request.args.get("message", "")
+    )
 
 
-@app.route("/servers/add", methods=["POST"])
+@app.route("/add", methods=["POST"])
 def add_server():
     name = request.form.get("name", "").strip()
-    host = request.form.get("host", "").strip()
-    port_text = request.form.get("port", "443").strip()
+    address = request.form.get("address", "").strip()
 
-    try:
-        port = int(port_text)
-        if not name or not host or not (1 <= port <= 65535):
-            raise ValueError
-        if len(name) > 100 or len(host) > 253:
-            raise ValueError
-    except ValueError:
-        return "Please enter a valid name, hostname and port.", 400
+    if not name or not address:
+        return redirect(url_for(
+            "dashboard", message="Enter the server name and address."
+        ))
 
-    with get_db() as db:
+    if len(name) > 100 or len(address) > 500:
+        return redirect(url_for(
+            "dashboard", message="The name or address is too long."
+        ))
+
+    with connect_db() as db:
         db.execute(
-            "INSERT INTO servers (name, host, port) VALUES (?, ?, ?)",
-            (name, host, port)
+            "INSERT INTO servers (name, address) VALUES (?, ?)",
+            (name, address)
         )
 
-    return redirect("/")
+    return redirect(url_for(
+        "dashboard", message="Server added successfully."
+    ))
 
 
-@app.route("/servers/delete/<int:server_id>", methods=["POST"])
+@app.route("/delete/<int:server_id>", methods=["POST"])
 def delete_server(server_id):
-    with get_db() as db:
+    with connect_db() as db:
         db.execute("DELETE FROM servers WHERE id = ?", (server_id,))
-    return redirect("/")
+
+    return redirect(url_for(
+        "dashboard", message="Server deleted."
+    ))
 
 
 @app.route("/api/monitor")
-def monitor_data():
-    current_servers = []
-    response_times = []
+def api_monitor():
+    servers = monitor_servers()
 
-    with get_db() as db:
-        servers = db.execute(
-            "SELECT * FROM servers ORDER BY id"
-        ).fetchall()
-
-        for server in servers:
-            status, response_ms = check_server(
-                server["host"], server["port"]
-            )
-
-            db.execute("""
-                INSERT INTO readings
-                (server_name, host, status, response_ms)
-                VALUES (?, ?, ?, ?)
-            """, (
-                server["name"], server["host"], status, response_ms
-            ))
-
-            current_servers.append({
-                "id": server["id"],
-                "name": server["name"],
-                "host": server["host"],
-                "port": server["port"],
-                "status": status,
-                "response_ms": response_ms
-            })
-
-            if response_ms is not None:
-                response_times.append(response_ms)
-
-        history = db.execute("""
-            SELECT server_name, host, status, response_ms, checked_at
+    with connect_db() as db:
+        history_rows = db.execute("""
+            SELECT server_name, response_ms, checked_at
             FROM readings
-            ORDER BY id DESC LIMIT 50
+            ORDER BY id DESC
+            LIMIT 200
         """).fetchall()
 
-    average = (
-        round(sum(response_times) / len(response_times), 2)
-        if response_times else None
+    history = [dict(row) for row in reversed(history_rows)]
+
+    online = sum(
+        1 for server in servers if server["status"] == "Online"
+    )
+    offline = sum(
+        1 for server in servers if server["status"] == "Offline"
     )
 
+    times = [
+        server["response_ms"]
+        for server in servers
+        if server["response_ms"] is not None
+    ]
+
+    average_ms = round(sum(times) / len(times), 2) if times else None
+
     return jsonify({
-        "servers": current_servers,
-        "history": [dict(row) for row in history],
-        "online": sum(
-            1 for server in current_servers
-            if server["status"] == "ONLINE"
-        ),
-        "average_ms": average
+        "servers": servers,
+        "history": history,
+        "summary": {
+            "total": len(servers),
+            "online": online,
+            "offline": offline,
+            "average_ms": average_ms
+        }
     })
 
 
@@ -394,34 +559,37 @@ def export_csv():
     writer = csv.writer(output)
 
     writer.writerow([
-        "Time", "Server Name", "Hostname",
-        "Status", "Response Time (ms)"
+        "Server Name", "Address", "Status",
+        "Response Time (ms)", "Checked At"
     ])
 
-    with get_db() as db:
+    with connect_db() as db:
         rows = db.execute("""
-            SELECT checked_at, server_name, host, status, response_ms
+            SELECT server_name, address, status, response_ms, checked_at
             FROM readings
             ORDER BY id DESC
         """).fetchall()
 
     for row in rows:
         writer.writerow([
-            row["checked_at"],
             row["server_name"],
-            row["host"],
+            row["address"],
             row["status"],
-            row["response_ms"]
+            row["response_ms"],
+            row["checked_at"]
         ])
 
     return Response(
-        "\ufeff" + output.getvalue(),
+        output.getvalue(),
         mimetype="text/csv",
         headers={
             "Content-Disposition":
-            "attachment; filename=network_monitor_report.csv"
+            "attachment; filename=network_monitor_history.csv"
         }
     )
+
+
+init_db()
 
 
 if __name__ == "__main__":
