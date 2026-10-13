@@ -17,12 +17,16 @@ return {"host": host, "status": "Offline", "response_time": None}
 
 @app.route("/")
 def home():
-server = check_server()
-response_time = server["response_time"]
-if response_time is None:
-response_time = "N/A"
+    server = check_server()
+    response_time = 
+    server["response_time"]
 
-status = server["status"]
+    if response_time is None:
+        response_time = "N/A"
+
+    status = server["status"]
+
+
 
 return f"""
 <!DOCTYPE html>
