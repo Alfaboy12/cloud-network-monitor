@@ -42,11 +42,13 @@ def check_server(host="google.com", port=443):
 def home():
     server = check_server()
 
-    return render_template(
-        "index.html",
-        server=server,
-        system=platform.system()
-    )
+    return f"""
+    <h1>Cloud Network Monitor</h1>
+    <p>Server: {server['host']}</p>
+    <p>Status: {server['status']}</p>
+    <p>Response Time: {server['response_time']} ms</p>
+    <p>System: {platform.system()}</p>
+    """
 
 
 if __name__ == "__main__":
