@@ -3,7 +3,12 @@ import platform
 import socket
 import time
 
-app = Flask(__name__)
+import os
+
+app = Flask(
+    __name__,
+    template_folder=os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
+)
 
 
 def check_server(host="google.com", port=443):
