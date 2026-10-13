@@ -11,7 +11,10 @@ from flask import Flask, request, redirect, url_for, jsonify, Response, render_t
 
 app = Flask(__name__)
 
-DB_PATH = os.environ.get("DATABASE_PATH", "monitor.db")
+DB_PATH = os.environ.get(
+    "DATABASE_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor.db")
+)
 
 
 def connect_db():
