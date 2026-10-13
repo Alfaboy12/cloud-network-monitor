@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cloud Network Monitor</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #101827;
+            color: white;
+            margin: 0;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 700px;
+            margin: 40px auto;
+        }
+
+        h1 {
+            color: #38bdf8;
+        }
+
+        .card {
+            background: #1e293b;
+            padding: 25px;
+            margin-top: 20px;
+            border-radius: 12px;
+        }
+
+        .online {
+            color: #4ade80;
+            font-weight: bold;
+        }
+
+        .offline {
+            color: #f87171;
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>Cloud Network Monitor</h1>
+
+        <p>Network Performance Monitoring and Analysis</p>
+
+        <div class="card">
+            <h2>Server Monitoring</h2>
+
+            <p>Server: {{ server.host }}</p>
+
+            <p>
+                Status:
+                <span class="{{ server.status | lower }}">
+                    {{ server.status }}
+                </span>
+            </p>
+
+            <p>
+                Response Time:
+                {% if server.response_time is not none %}
+                    {{ server.response_time }} ms
+                {% else %}
+                    Not available
+                {% endif %}
+            </p>
+
+            <p>Operating System: {{ system }}</p>
+        </div>
+
+        <p>HND Computer Science Project</p>
+    </div>
+</body>
+</html>
