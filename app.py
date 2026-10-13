@@ -1,313 +1,450 @@
-from flask import Flask, jsonify
-import platform
+import os
+import csv
+import io
 import socket
+import sqlite3
 import time
-from collections import deque
+from functools import wraps
+from flask import (
+    Flask, request, redirect, url_for,
+    session, jsonify, Response, render_template_string
+)
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-key")
 
-history = deque(maxlen=100)
+DATABASE = os.environ.get("DATABASE_PATH", "monitor.db")
+USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+PASSWORD = os.environ.get("ADMIN_PASSWORD", "ChangeMe123!")
+
+def get_db():
+    connection = sqlite3.connect(DATABASE, timeout=10)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+def init_db():
+    folder = os.path.dirname(DATABASE)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+
+    with get_db() as db:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS servers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL DEFAULT 443
+            )
+        """)
+
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS readings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                server_id INTEGER,
+                server_name TEXT,
+                host TEXT,
+                status TEXT,
+                response_ms REAL,
+                checked_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        count = db.execute(
+            "SELECT COUNT(*) FROM servers"
+        ).fetchone()[0]
+
+        if count == 0:
+            db.execute(
+                "INSERT INTO servers (name, host, port) VALUES (?, ?, ?)",
+                ("Google", "google.com", 443)
+            )
+
+init_db()
 
 
-def check_server(host="google.com", port=443):
-    start_time = time.time()
-
-    try:
-        connection = socket.create_connection(
-            (host, port), timeout=3
-        )
-        connection.close()
-
-        response_time = round(
-            (time.time() - start_time) * 1000, 2
-        )
-
-        return {
-            "host": host,
-            "status": "Online",
-            "response_time": response_time
-        }
-
-    except OSError:
-        return {
-            "host": host,
-            "status": "Offline",
-            "response_time": None
-        }
+def login_required(function):
+    @wraps(function)
+    def wrapper(*args, **kwargs):
+        if not session.get("logged_in"):
+            return redirect(url_for("login"))
+        return function(*args, **kwargs)
+    return wrapper
 
 
-@app.route("/")
-def home():
-    return """
+LOGIN_PAGE = """
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cloud Network Monitor</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background: #eef2f7;
-            margin: 0;
-            padding: 15px;
-            color: #222;
-        }
-
-        .container {
-            max-width: 900px;
-            margin: 20px auto;
-            background: white;
-            padding: 20px;
-            border-radius: 12px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-        }
-
-        h1 {
-            color: #1457a6;
-            text-align: center;
-        }
-
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 12px;
-        }
-
-        .card {
-            background: #f4f7fb;
-            padding: 15px;
-            border-radius: 8px;
-        }
-
-        .value {
-            font-size: 22px;
-            font-weight: bold;
-        }
-
-        .chart-box {
-            margin-top: 25px;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 15px;
-        }
-
-        th, td {
-            padding: 10px;
-            border-bottom: 1px solid #ddd;
-            text-align: left;
-        }
-
-        th {
-            background: #1457a6;
-            color: white;
-        }
-
-        .table-wrap {
-            overflow-x: auto;
-        }
-
-        .note {
-            color: #555;
-            font-size: 14px;
-        }
-    </style>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Network Monitor Login</title>
+<style>
+body{font-family:Arial;background:#101827;color:white;
+display:flex;justify-content:center;align-items:center;
+min-height:90vh;margin:0}
+.box{background:#1e293b;padding:25px;border-radius:12px;
+width:85%;max-width:350px}
+input,button{box-sizing:border-box;width:100%;padding:12px;
+margin:8px 0;border-radius:6px;border:0}
+button{background:#16a34a;color:white;font-weight:bold}
+</style>
 </head>
+<body>
+<div class="box">
+<h2>Network Monitor</h2>
+<p>Sign in to access your dashboard.</p>
+{% if error %}<p style="color:#f87171">{{ error }}</p>{% endif %}
+<form method="post">
+<input name="username" placeholder="Username" required>
+<input name="password" type="password" placeholder="Password" required>
+<button type="submit">Login</button>
+</form>
+</div>
+</body>
+</html>
+"""
 
+
+DASHBOARD = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cloud Network Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+body{font-family:Arial;background:#101827;color:#f8fafc;
+margin:0;padding:15px}
+.container{max-width:1000px;margin:auto}
+.card{background:#1e293b;padding:16px;margin:12px 0;
+border-radius:10px}
+input,button{padding:10px;margin:4px;border-radius:5px;border:0}
+button,.btn{background:#16a34a;color:white;padding:10px;
+border:0;border-radius:5px;text-decoration:none;cursor:pointer}
+.delete{background:#dc2626}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:9px;border-bottom:1px solid #475569;text-align:left}
+.tablewrap{overflow-x:auto}
+.good{color:#4ade80}.bad{color:#f87171}
+.small{color:#cbd5e1;font-size:13px}
+</style>
+</head>
 <body>
 <div class="container">
-    <h1>Cloud Network Monitor</h1>
+<h1>☁️ Cloud Network Monitor</h1>
+<p>Network Performance Monitoring and Analysis</p>
+<p>Welcome, {{ username }}!
+<a class="btn" href="/logout">Logout</a>
+<a class="btn" href="/export">Download CSV Report</a></p>
 
-    <p style="text-align:center;">
-        Network Performance Monitoring and Analysis
-    </p>
+<div class="card">
+<h2>Add a Server</h2>
+<form action="/servers/add" method="post">
+<input name="name" placeholder="Server name" required>
+<input name="host" placeholder="Hostname (e.g. google.com)" required>
+<input name="port" type="number" value="443" min="1" max="65535" required>
+<button type="submit">Add Server</button>
+</form>
+<p class="small">Only add servers you own or have permission to monitor.</p>
+</div>
 
-    <div class="grid">
-        <div class="card">
-            <h3>Server</h3>
-            <p class="value">google.com</p>
-        </div>
+<div class="card">
+<h2>Server Status</h2>
+<p class="small">Monitoring checks run automatically every 15 seconds while this dashboard is open.</p>
+<div class="tablewrap">
+<table>
+<thead><tr><th>Server</th><th>Host</th><th>Status</th>
+<th>Response Time</th><th>Action</th></tr></thead>
+<tbody id="servers"></tbody>
+</table>
+</div>
+</div>
 
-        <div class="card">
-            <h3>Connection Status</h3>
-            <p class="value" id="status">Checking...</p>
-        </div>
+<div class="card">
+<h2>Performance Summary</h2>
+<p id="summary">Loading monitoring data...</p>
+<canvas id="chart"></canvas>
+</div>
 
-        <div class="card">
-            <h3>Current Response</h3>
-            <p class="value" id="current">--</p>
-        </div>
-
-        <div class="card">
-            <h3>Average Response</h3>
-            <p class="value" id="average">--</p>
-        </div>
-
-        <div class="card">
-            <h3>Fastest Response</h3>
-            <p class="value" id="fastest">--</p>
-        </div>
-
-        <div class="card">
-            <h3>Slowest Response</h3>
-            <p class="value" id="slowest">--</p>
-        </div>
-    </div>
-
-    <div class="chart-box">
-        <h3>Network Performance History</h3>
-        <p class="note">A new reading is taken every 5 seconds.</p>
-        <canvas id="chart"></canvas>
-    </div>
-
-    <h3>Recent Network Readings</h3>
-
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>Time</th>
-                    <th>Status</th>
-                    <th>Response Time</th>
-                </tr>
-            </thead>
-            <tbody id="history">
-                <tr><td colspan="3">Waiting for readings...</td></tr>
-            </tbody>
-        </table>
-    </div>
-
-    <p class="note">
-        History is kept temporarily while this server process runs.
-        It may reset after a restart or redeployment.
-    </p>
+<div class="card">
+<h2>Recent Monitoring History</h2>
+<div class="tablewrap">
+<table>
+<thead><tr><th>Time</th><th>Server</th><th>Status</th>
+<th>Response (ms)</th></tr></thead>
+<tbody id="history"></tbody>
+</table>
+</div>
+</div>
 </div>
 
 <script>
-const labels = [];
-const readings = [];
-const tableHistory = [];
+let chart;
 
-const chart = new Chart(document.getElementById("chart"), {
-    type: "line",
-    data: {
-        labels: labels,
-        datasets: [{
-            label: "Response Time (ms)",
-            data: readings,
-            borderWidth: 2,
-            tension: 0.3,
-            spanGaps: true
-        }]
-    },
-    options: {
-        responsive: true,
-        animation: false,
-        scales: {
-            y: {
-                beginAtZero: true,
-                title: {
-                    display: true,
-                    text: "Milliseconds (ms)"
-                }
-            }
-        }
-    }
-});
-
-async function updateMonitor() {
+async function refreshData(){
     try {
-        const response = await fetch("/data");
-        if (!response.ok) throw new Error("Request failed");
-
+        const response = await fetch('/api/monitor', {cache:'no-store'});
+        if (!response.ok) return;
         const data = await response.json();
 
-        document.getElementById("status").textContent = data.status;
-        document.getElementById("status").style.color =
-            data.status === "Online" ? "green" : "red";
+        const serverBody = document.getElementById('servers');
+        serverBody.innerHTML = '';
 
-        document.getElementById("current").textContent =
-            data.response_time === null ? "N/A" : data.response_time + " ms";
+        data.servers.forEach(s => {
+            const row = document.createElement('tr');
+            const statusClass = s.status === 'ONLINE' ? 'good' : 'bad';
 
-        document.getElementById("average").textContent =
-            data.average === null ? "N/A" : data.average + " ms";
+            [s.name, s.host, s.status,
+             s.response_ms === null ? 'N/A' : s.response_ms + ' ms'
+            ].forEach((value, index) => {
+                const cell = document.createElement('td');
+                cell.textContent = value;
+                if (index === 2) cell.className = statusClass;
+                row.appendChild(cell);
+            });
 
-        document.getElementById("fastest").textContent =
-            data.fastest === null ? "N/A" : data.fastest + " ms";
+            const actionCell = document.createElement('td');
+            const form = document.createElement('form');
+            form.method = 'post';
+            form.action = '/servers/delete/' + s.id;
 
-        document.getElementById("slowest").textContent =
-            data.slowest === null ? "N/A" : data.slowest + " ms";
+            const button = document.createElement('button');
+            button.type = 'submit';
+            button.className = 'delete';
+            button.textContent = 'Remove';
+            button.onclick = (event) => {
+                if (!confirm('Remove this server?')) event.preventDefault();
+            };
 
-        const time = new Date().toLocaleTimeString();
-
-        labels.push(time);
-        readings.push(data.response_time);
-
-        if (labels.length > 20) {
-            labels.shift();
-            readings.shift();
-        }
-
-        chart.update();
-
-        tableHistory.unshift({
-            time: time,
-            status: data.status,
-            response: data.response_time
+            form.appendChild(button);
+            actionCell.appendChild(form);
+            row.appendChild(actionCell);
+            serverBody.appendChild(row);
         });
 
-        if (tableHistory.length > 10) tableHistory.pop();
+        const historyBody = document.getElementById('history');
+        historyBody.innerHTML = '';
 
-        document.getElementById("history").innerHTML =
-            tableHistory.map(item => `
-                <tr>
-                    <td>${item.time}</td>
-                    <td>${item.status}</td>
-                    <td>${item.response === null ? "N/A" : item.response + " ms"}</td>
-                </tr>
-            `).join("");
+        data.history.forEach(r => {
+            const row = document.createElement('tr');
+            [r.checked_at, r.server_name, r.status,
+             r.response_ms === null ? 'N/A' : r.response_ms
+            ].forEach(value => {
+                const cell = document.createElement('td');
+                cell.textContent = value ?? '';
+                row.appendChild(cell);
+            });
+            historyBody.appendChild(row);
+        });
 
+        document.getElementById('summary').textContent =
+            'Servers: ' + data.servers.length +
+            ' | Online: ' + data.online +
+            ' | Offline: ' + (data.servers.length - data.online) +
+            ' | Average response time: ' +
+            (data.average_ms === null ? 'N/A' : data.average_ms + ' ms');
+
+        const labels = data.history.slice().reverse().map(r => r.checked_at);
+        const values = data.history.slice().reverse().map(r => r.response_ms);
+
+        if (chart) chart.destroy();
+
+        chart = new Chart(document.getElementById('chart'), {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Response time (ms)',
+                    data: values,
+                    spanGaps: false,
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: {y: {beginAtZero: true}}
+            }
+        });
     } catch (error) {
-        document.getElementById("status").textContent =
-            "Monitoring unavailable";
+        document.getElementById('summary').textContent =
+            'Unable to load monitoring data. Please refresh.';
     }
 }
 
-updateMonitor();
-setInterval(updateMonitor, 5000);
+refreshData();
+setInterval(refreshData, 15000);
 </script>
 </body>
 </html>
 """
 
 
-@app.route("/data")
-def data():
-    result = check_server()
+@app.route("/")
+@login_required
+def dashboard():
+    return render_template_string(
+        DASHBOARD,
+        username=session.get("username", USERNAME)
+    )
 
-    if result["response_time"] is not None:
-        history.append(result["response_time"])
 
-    result["system"] = platform.system()
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        user = request.form.get("username", "")
+        password = request.form.get("password", "")
 
-    if history:
-        result["average"] = round(sum(history) / len(history), 2)
-        result["fastest"] = min(history)
-        result["slowest"] = max(history)
-    else:
-        result["average"] = None
-        result["fastest"] = None
-        result["slowest"] = None
+        if user == USERNAME and password == PASSWORD:
+            session.clear()
+            session["logged_in"] = True
+            session["username"] = user
+            return redirect(url_for("dashboard"))
 
-    result["readings_count"] = len(history)
+        return render_template_string(
+            LOGIN_PAGE, error="Incorrect username or password."
+        )
 
-    return jsonify(result)
+    return render_template_string(LOGIN_PAGE, error=None)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.route("/servers/add", methods=["POST"])
+@login_required
+def add_server():
+    name = request.form.get("name", "").strip()
+    host = request.form.get("host", "").strip()
+    port_text = request.form.get("port", "443").strip()
+
+    try:
+        port = int(port_text)
+        if not name or not host or not (1 <= port <= 65535):
+            raise ValueError()
+        if len(name) > 100 or len(host) > 253:
+            raise ValueError()
+    except ValueError:
+        return "Invalid server name, hostname, or port.", 400
+
+    with get_db() as db:
+        db.execute(
+            "INSERT INTO servers (name, host, port) VALUES (?, ?, ?)",
+            (name, host, port)
+        )
+
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/servers/delete/<int:server_id>", methods=["POST"])
+@login_required
+def delete_server(server_id):
+    with get_db() as db:
+        db.execute("DELETE FROM servers WHERE id = ?", (server_id,))
+    return redirect(url_for("dashboard"))
+
+
+def check_server(host, port):
+    start = time.perf_counter()
+
+    try:
+        with socket.create_connection((host, port), timeout=3):
+            elapsed = round((time.perf_counter() - start) * 1000, 2)
+        return "ONLINE", elapsed
+    except (OSError, ValueError):
+        return "OFFLINE", None
+
+
+@app.route("/api/monitor")
+@login_required
+def monitor_data():
+    with get_db() as db:
+        servers = db.execute(
+            "SELECT * FROM servers ORDER BY id"
+        ).fetchall()
+
+        current_servers = []
+        response_times = []
+
+        for server in servers:
+            status, response_ms = check_server(
+                server["host"], server["port"]
+            )
+
+            db.execute("""
+                INSERT INTO readings
+                (server_id, server_name, host, status, response_ms)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                server["id"], server["name"], server["host"],
+                status, response_ms
+            ))
+
+            current_servers.append({
+                "id": server["id"],
+                "name": server["name"],
+                "host": server["host"],
+                "port": server["port"],
+                "status": status,
+                "response_ms": response_ms
+            })
+
+            if response_ms is not None:
+                response_times.append(response_ms)
+
+        history = db.execute("""
+            SELECT server_name, host, status, response_ms, checked_at
+            FROM readings
+            ORDER BY id DESC LIMIT 50
+        """).fetchall()
+
+    average = (
+        round(sum(response_times) / len(response_times), 2)
+        if response_times else None
+    )
+
+    return jsonify({
+        "servers": current_servers,
+        "history": [dict(row) for row in history],
+        "online": sum(1 for s in current_servers if s["status"] == "ONLINE"),
+        "average_ms": average
+    })
+
+
+@app.route("/export")
+@login_required
+def export_csv():
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow([
+        "Time", "Server Name", "Hostname",
+        "Status", "Response Time (ms)"
+    ])
+
+    with get_db() as db:
+        rows = db.execute("""
+            SELECT checked_at, server_name, host, status, response_ms
+            FROM readings
+            ORDER BY id DESC
+        """).fetchall()
+
+    for row in rows:
+        writer.writerow([
+            row["checked_at"], row["server_name"], row["host"],
+            row["status"], row["response_ms"]
+        ])
+
+    return Response(
+        "\ufeff" + output.getvalue(),
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition":
+            "attachment; filename=network_monitor_report.csv"
+        }
+    )
 
 
 if __name__ == "__main__":
-    app.run(debug=False)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
