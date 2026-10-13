@@ -82,5 +82,5 @@ return f"""
 </html>
 """
 
-if name == "main":
-app.run(debug=False)
+if __name__ == "__main__":
+    app.run(debug=False)
